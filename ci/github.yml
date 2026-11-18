@@ -1,0 +1,42 @@
+name: Fletcher
+on:
+  workflow_call:
+  schedule:
+    - cron: '23 5 * * *'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: fletcher-${{ github.repository }}
+  cancel-in-progress: false
+jobs:
+  report:
+    if: github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    container: ${{ vars.FLETCHER_REPORT_IMAGE }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: mvn -B org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeAggregateBom
+      - run: python3 /opt/fletcher/fletcher.py --output fletcher-scan.json scan target/bom.json
+      - run: python3 /opt/fletcher/fletcher.py --output fletcher-digest.json digest
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fletcher
+          path: fletcher-*.json
+          retention-days: 14
+  propose:
+    needs: report
+    if: vars.FLETCHER_PROPOSE == 'true' && github.ref_name == github.event.repository.default_branch
+    runs-on: ubuntu-latest
+    environment: fletcher-publisher
+    container: ${{ vars.FLETCHER_RENOVATE_IMAGE }}
+    steps:
+      - run: renovate "$GITHUB_REPOSITORY"
+        env:
+          RENOVATE_PLATFORM: github
+          RENOVATE_TOKEN: ${{ secrets.FLETCHER_RENOVATE_TOKEN }}
+          RENOVATE_ONBOARDING: 'false'
+          RENOVATE_REQUIRE_CONFIG: required
