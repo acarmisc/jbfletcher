@@ -1,7 +1,11 @@
-fletcher-report:
+.fletcher:
   image: $FLETCHER_REPORT_IMAGE
+  stage: test
   rules:
     - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web")'
+
+fletcher-report:
+  extends: .fletcher
   script:
     - mvn -B org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeAggregateBom
     - python3 /opt/fletcher/fletcher.py --output fletcher-scan.json scan target/bom.json --summary fletcher-summary.md
@@ -15,21 +19,35 @@ fletcher-report:
       - fletcher-digest.json
       - fletcher-summary.md
 
-fletcher-renovate:
-  image:
-    name: $FLETCHER_RENOVATE_IMAGE
-    entrypoint: ['']
-  resource_group: fletcher-renovate
+fletcher-triage:
+  extends: .fletcher
   needs:
     - job: fletcher-report
-      artifacts: false
-  environment: fletcher-publisher
-  variables:
-    GIT_STRATEGY: none
-    RENOVATE_PLATFORM: gitlab
-    RENOVATE_ONBOARDING: 'false'
-    RENOVATE_REQUIRE_CONFIG: required
-  rules:
-    - if: '$FLETCHER_PROPOSE == "true" && $CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "schedule"'
+      artifacts: true
   script:
-    - RENOVATE_ENDPOINT="$CI_API_V4_URL/" renovate "$CI_PROJECT_PATH"
+    - |
+      set --
+      if [ -n "${FLETCHER_RUNTIME_SCAN:-}${FLETCHER_RUNTIME_RELEASE:-}" ]; then
+        set -- --runtime-scan "${FLETCHER_RUNTIME_SCAN:?expected CI file variable}" --runtime-release "${FLETCHER_RUNTIME_RELEASE:?expected release identifier}"
+      fi
+      python3 /opt/fletcher/fletcher.py --output fletcher-triage.json triage fletcher-scan.json "$@"
+  artifacts:
+    access: developer
+    expire_in: 14 days
+    paths: [fletcher-triage.json]
+
+fletcher-issue:
+  extends: .fletcher
+  needs:
+    - job: fletcher-triage
+      artifacts: true
+  environment: fletcher-issues
+  resource_group: fletcher-issues
+  variables:
+    GIT_STRATEGY: empty
+  rules:
+    - if: '$FLETCHER_ISSUES == "true" && $CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web")'
+      when: manual
+      allow_failure: true
+  script:
+    - python3 /opt/fletcher/fletcher.py issue fletcher-triage.json

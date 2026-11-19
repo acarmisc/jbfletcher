@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import os
 from subprocess import CompletedProcess
 import tempfile
 import unittest
@@ -9,6 +10,40 @@ import fletcher
 
 
 class FletcherTest(unittest.TestCase):
+    @staticmethod
+    def sample_scan(version='1'):
+        package = {'package': {'name': 'example:lib', 'version': version, 'ecosystem': 'Maven'},
+                   'vulnerabilities': [{'id': 'GHSA-example', 'aliases': ['CVE-2020-1234']}]}
+        return {'packages': 1, 'osv': {'results': [{'packages': [package]}]}}
+
+    def test_triage_requires_matching_runtime_and_kev_for_urgent(self):
+        scan = self.sample_scan()
+        kev = [{'cveID': 'CVE-2020-1234'}]
+        confirmed = fletcher.triage(scan, kev, scan, 'release@digest')['findings'][0]
+        unverified = fletcher.triage(scan, kev, self.sample_scan('2'), 'release@digest')['findings'][0]
+        self.assertEqual(confirmed['priority'], 'urgent-review')
+        self.assertEqual((unverified['priority'], unverified['runtime']), ('priority-review', 'unverified'))
+        self.assertEqual(fletcher.triage(self.sample_scan('2'), [])['findings'][0]['key'], confirmed['key'])
+
+    @patch.dict(os.environ, {'CI_PROJECT_ID': '42', 'CI_PIPELINE_ID': '3', 'CI_COMMIT_SHA': 'abcdef',
+                             'CI_SERVER_URL': 'https://git.example', 'CI_API_V4_URL': 'https://git.example/api/v4'})
+    @patch('fletcher.urllib.request.build_opener')
+    def test_issue_is_confidential_and_reuses_existing(self, opener):
+        report = fletcher.triage(self.sample_scan(), [])
+        key = report['findings'][0]['key']
+        existing = {'iid': 7, 'web_url': 'https://git.example/issues/7', 'confidential': True,
+                    'description': f'<!-- FLETCHER-TRIAGE-{key} -->'}
+        response = opener.return_value.open.return_value.__enter__.return_value
+        response.headers = {}
+        response.read.side_effect = [b'[]', json.dumps(existing), json.dumps([existing])]
+        self.assertEqual(fletcher.gitlab_issue(report, key, 'test')['status'], 'created')
+        self.assertTrue(json.loads(opener.return_value.open.call_args.args[0].data)['confidential'])
+        self.assertEqual(fletcher.gitlab_issue(report, key, 'test')['status'], 'existing')
+        self.assertEqual(opener.return_value.open.call_count, 3)
+        report['context']['CI_PIPELINE_ID'] = 'wrong'
+        with self.assertRaisesRegex(ValueError, 'does not belong'):
+            fletcher.gitlab_issue(report, key, 'test')
+
     def test_markdown_deduplicates_by_package_version_and_cve(self):
         advisory = {'id': 'GHSA-example', 'aliases': ['CVE-2020-1234']}
         package = {'package': {'name': 'example:lib', 'version': '1', 'ecosystem': 'Maven'},

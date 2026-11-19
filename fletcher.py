@@ -2,6 +2,7 @@
 import argparse
 import concurrent.futures
 import datetime as dt
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -126,13 +127,8 @@ def summarize(result, model):
     return str(agent(json.dumps(evidence)))
 
 
-def markdown_report(result, known_exploited):
-    import html
+def advisory_rows(result):
     import re
-
-    def cell(value):
-        return re.sub(r'([\\`*_\[\]|])', r'\\\1', html.escape(' '.join(value.split())))
-
     rows = {}
     for source in result['osv']['results']:
         for item in source.get('packages', []):
@@ -147,6 +143,17 @@ def markdown_report(result, known_exploited):
                          if 'fixed' in event}
                 for identifier in cves or {advisory['id']}:
                     rows.setdefault((package['name'], package['version'], identifier), set()).update(fixes)
+    return rows
+
+
+def markdown_report(result, known_exploited):
+    import html
+    import re
+
+    def cell(value):
+        return re.sub(r'([\\`*_\[\]|])', r'\\\1', html.escape(' '.join(value.split())))
+
+    rows = advisory_rows(result)
     lines = ['# Fletcher — scansione Maven', '', f"Pacchetti analizzati: **{result['packages']}**. "
              f"Occorrenze scanner: **{result['findings']}**. Righe deduplicate: **{len(rows)}**.", '',
              '| Pacchetto | Versione | Advisory | CISA KEV | Fix dichiarati¹ |', '|---|---|---|---|---|']
@@ -165,6 +172,80 @@ def markdown_report(result, known_exploited):
     return '\n'.join(lines) + '\n'
 
 
+def ci_context():
+    return {key: os.getenv(key) for key in ('CI_PROJECT_ID', 'CI_PIPELINE_ID', 'CI_COMMIT_SHA')}
+
+
+def triage(scan_result, catalog, runtime=None, release=None):
+    kev_ids = None if catalog is None else {item['cveID'] for item in catalog}
+    runtime_rows = advisory_rows(runtime) if runtime is not None else {}
+    rows = advisory_rows(scan_result)
+    findings = []
+    for (package, version, advisory), fixes in sorted(rows.items()):
+        matched = (package, version, advisory) in runtime_rows
+        exploited = None if kev_ids is None or not advisory.startswith('CVE-') else advisory in kev_ids
+        priority = 'urgent-review' if matched and exploited else 'priority-review' if matched or exploited else 'review'
+        findings.append({
+            'key': hashlib.sha256(json.dumps([package, advisory]).encode()).hexdigest()[:20],
+            'package': package, 'version': version, 'advisory': advisory,
+            'kev': exploited, 'runtime': 'matched' if matched else 'unverified', 'priority': priority,
+            'declared_fixes': sorted(fixes),
+        })
+    findings.sort(key=lambda row: ({'urgent-review': 0, 'priority-review': 1, 'review': 2}[row['priority']], row['package'], row['advisory']))
+    return {'context': ci_context(), 'runtime_release': release, 'kev_available': catalog is not None,
+            'packages': scan_result['packages'], 'findings': findings}
+
+
+def gitlab_issue(report, key, token):
+    context = ci_context()
+    if not all(context.values()) or report['context'] != context:
+        raise ValueError('Triage artifact does not belong to this pipeline')
+    if not report['kev_available']:
+        raise ValueError('KEV enrichment unavailable; publication blocked')
+    rows = [row for row in report['findings'] if row['key'] == key]
+    if not rows:
+        raise ValueError('Select a finding key from the triage artifact')
+    api = urllib.parse.urlsplit(os.environ['CI_API_V4_URL'])
+    server = urllib.parse.urlsplit(os.environ['CI_SERVER_URL'])
+    if api.scheme != 'https' or api.netloc != server.netloc or api.query or api.fragment:
+        raise ValueError('Expected the current GitLab HTTPS API')
+    url = f"{api.geturl().rstrip('/')}/projects/{int(context['CI_PROJECT_ID'])}/issues"
+    marker = f'FLETCHER-TRIAGE-{key}'
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *_args, **_kwargs):
+            return None
+
+    opener = urllib.request.build_opener(NoRedirect())
+
+    def request(query='', payload=None):
+        data = json.dumps(payload).encode() if payload is not None else None
+        req = urllib.request.Request(url + query, data=data,
+                                     headers={'PRIVATE-TOKEN': token, 'Content-Type': 'application/json'})
+        with opener.open(req, timeout=30) as response:
+            return json.load(response), response.headers.get('X-Next-Page')
+
+    page = '1'
+    while page:
+        issues, page = request('?' + urllib.parse.urlencode({'search': marker, 'in': 'description', 'scope': 'all', 'page': page}))
+        for issue in issues:
+            if f'<!-- {marker} -->' in (issue.get('description') or ''):
+                if not issue.get('confidential'):
+                    raise ValueError('An existing non-confidential issue uses this finding key')
+                return {'status': 'existing', 'iid': issue['iid'], 'web_url': issue['web_url']}
+    row = rows[0]
+    versions = ', '.join(sorted({item['version'] for item in rows}))
+    body = (f'<!-- {marker} -->\n\n'
+            f'**Advisory:** {row["advisory"]}\n\n**Observed versions:** {versions}\n\n'
+            f'**Triage suggestion:** {row["priority"]}\n\n**Runtime evidence:** {row["runtime"]}\n\n'
+            f'**CISA KEV match:** {row["kev"]}\n\n'
+            f'Pipeline: {context["CI_PIPELINE_ID"]}; commit: {context["CI_COMMIT_SHA"]}.\n\n'
+            'Manually approved for tracking. Confirm service exposure, applicability and existing remediation before making changes.')
+    issue, _ = request(payload={'title': f'Security triage: {row["package"]} / {row["advisory"]}'[:255],
+                                'description': body, 'confidential': True})
+    return {'status': 'created', 'iid': issue['iid'], 'web_url': issue['web_url']}
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path)
@@ -175,9 +256,34 @@ def main():
     scanner.add_argument('sbom', type=Path)
     scanner.add_argument('--scanner', default='osv-scanner')
     scanner.add_argument('--summary', type=Path)
+    reviewer = commands.add_parser('triage')
+    reviewer.add_argument('report', type=Path)
+    reviewer.add_argument('--runtime-scan', type=Path)
+    reviewer.add_argument('--runtime-release')
+    publisher = commands.add_parser('issue')
+    publisher.add_argument('report', type=Path)
+    publisher.add_argument('--finding', default=os.getenv('FLETCHER_FINDING_KEY'))
     args = parser.parse_args()
     try:
-        result = digest(args.days) if args.command == 'digest' else scan(args.sbom, args.scanner)
+        if args.command == 'digest':
+            result = digest(args.days)
+        elif args.command == 'scan':
+            result = scan(args.sbom, args.scanner)
+        elif args.command == 'triage':
+            if bool(args.runtime_scan) != bool(args.runtime_release):
+                raise ValueError('Supply both runtime scan and release identifier, or neither')
+            try:
+                catalog = kev()
+            except (OSError, ValueError, KeyError, TypeError):
+                catalog = None
+            result = triage(json.loads(args.report.read_text()), catalog,
+                            json.loads(args.runtime_scan.read_text()) if args.runtime_scan else None,
+                            args.runtime_release)
+        else:
+            token = os.getenv('FLETCHER_ISSUE_TOKEN')
+            if not token or not args.finding:
+                raise ValueError('Set FLETCHER_ISSUE_TOKEN and select one finding')
+            result = gitlab_issue(json.loads(args.report.read_text()), args.finding, token)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
         parser.exit(2, f'fletcher: {exc}\n')
     result['generated_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
@@ -188,7 +294,7 @@ def main():
             print(f'KEV unavailable; issue simulation suspended: {type(exc).__name__}', file=sys.stderr)
             known_exploited = None
         args.summary.write_text(markdown_report(result, known_exploited), encoding='utf-8')
-    if args.bedrock_model and not result.get('errors'):
+    if args.bedrock_model and args.command in ('digest', 'scan') and not result.get('errors'):
         try:
             from strands.models import BedrockModel
             result['model_summary_unverified'] = summarize(result, BedrockModel(model_id=args.bedrock_model))

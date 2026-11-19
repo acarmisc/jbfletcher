@@ -1,0 +1,19 @@
+# Optional remediation publisher; separate from the three triage jobs.
+fletcher-renovate:
+  image:
+    name: $FLETCHER_RENOVATE_IMAGE
+    entrypoint: ['']
+  resource_group: fletcher-renovate
+  needs:
+    - job: fletcher-report
+      artifacts: false
+  environment: fletcher-publisher
+  variables:
+    GIT_STRATEGY: none
+    RENOVATE_PLATFORM: gitlab
+    RENOVATE_ONBOARDING: 'false'
+    RENOVATE_REQUIRE_CONFIG: required
+  rules:
+    - if: '$FLETCHER_PROPOSE == "true" && $CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && $CI_PIPELINE_SOURCE == "schedule"'
+  script:
+    - RENOVATE_ENDPOINT="$CI_API_V4_URL/" renovate "$CI_PROJECT_PATH"
