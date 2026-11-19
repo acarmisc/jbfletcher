@@ -1,6 +1,20 @@
 # GitLab: report, triage e issue
 
-I tre job in `gitlab.yml` usano **lo stesso digest** in `FLETCHER_REPORT_IMAGE`. Il runner deve poterlo scaricare. Il template richiede un branch predefinito protetto e lo stage `test` (oppure ridefinirlo su `.fletcher`). I job partono da una schedule o da una pipeline web sul branch predefinito. Verificare che la schedule non inneschi anche i job di deploy o release del progetto.
+I tre job in `gitlab.yml` usano **lo stesso digest** in `FLETCHER_REPORT_IMAGE`. Non servono Kubernetes, kubeconfig o accesso al registry applicativo. Fletcher analizza le dipendenze Maven; per il sorgente Java mantenere un job SonarQube separato. Per partire, impostare `FLETCHER_PILOT=true` nella schedule sul branch predefinito protetto. Lasciare `FLETCHER_ISSUES` non impostata fino al collaudo del report. Il template usa lo stage `test`, ridefinibile su `.fletcher`.
+
+Per isolare la schedule dalla CI ordinaria, spostare la configurazione esistente invariata in `.gitlab/normal.yml` e salvare il template Fletcher in `.gitlab/fletcher.yml`. Usare questo wrapper come `.gitlab-ci.yml`:
+
+```yaml
+include:
+  - local: /.gitlab/normal.yml
+    rules:
+      - if: '$CI_PIPELINE_SOURCE != "schedule" || $FLETCHER_PILOT != "true"'
+  - local: /.gitlab/fletcher.yml
+    rules:
+      - if: '$CI_PIPELINE_SOURCE == "schedule" && $FLETCHER_PILOT == "true"'
+```
+
+Nel file Fletcher dichiarare `stages: [test]` oppure usare lo stage predefinito GitLab. Impostare `MAVEN_ARGS` se servono profili o settings Maven (per esempio `-s ci_settings.xml`). Dopo il primo run verificare nella pipeline che ci siano solo report e triage e che entrambi abbiano caricato gli artifact. Se il progetto preferisce un include remoto, fissarlo a uno SHA verificato e mantenere le stesse regole di isolamento.
 
 1. **`fletcher-report`** — bundle della scansione: `fletcher-scan.json` come evidenza per il job successivo, `fletcher-summary.md` da leggere e `fletcher-digest.json` come contesto generale. Un report incompleto non abilita i job successivi.
 2. **`fletcher-triage`** — `fletcher-triage.json`, con finding ordinati, chiavi stabili e motivazioni verificabili. Per aggiungere evidenza runtime configurare `FLETCHER_RUNTIME_SCAN` come variabile CI di tipo File (output `scan` da uno SBOM della release distribuita) e `FLETCHER_RUNTIME_RELEASE` con la sua identità immutabile. Al momento è l'operatore che attesta la provenienza: nessuna scoperta automatica di servizi o artefatti. Solo una corrispondenza esatta di pacchetto, versione e advisory è un match; mancata corrispondenza significa `unverified`, non assenza di impatto.
