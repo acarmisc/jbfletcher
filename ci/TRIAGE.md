@@ -9,3 +9,26 @@ I tre job in `gitlab.yml` usano **lo stesso digest** in `FLETCHER_REPORT_IMAGE`.
 `urgent-review` significa corrispondenza runtime e presenza in CISA KEV; `priority-review` indica uno dei due segnali. `review` significa che questi segnali non sono stati confermati, **non** che il rischio è basso. Non viene stimata la raggiungibilità del codice né l'esposizione di rete. Se il feed KEV è indisponibile, il triage mantiene le evidenze disponibili e blocca la pubblicazione. Nessuna apertura automatica, nessun LLM nella decisione.
 
 Per le proposte correttive automatiche, includere separatamente `gitlab-renovate.yml`: non è uno dei tre job di triage e usa la sua immagine e identità dedicate.
+
+## SBOM dell'immagine
+
+Includere `runtime-sbom.yml` nella pipeline di build e aggiungere un job dopo il push. Il job di push deve pubblicare un artifact `reports:dotenv` con `IMAGE_REF=registry/repo@sha256:…` (digest del manifest della piattaforma distribuita, non tag o indice multi-arch). Il runner Syft serve accesso di sola lettura al registry; il login kubelet per l'immagine del job non autentica automaticamente Syft.
+
+```yaml
+runtime-sbom:
+  extends: .fletcher-runtime-sbom
+  stage: inventory # dichiarare dopo il push, prima del deploy
+  needs:
+    - job: docker-build-push
+      artifacts: true
+```
+
+Distribuire lo stesso digest e conservare `runtime/bom.json` e `runtime/image.ref` in uno storage privato per tutta la vita della release. Per la prova, scaricare i due file dalla build effettivamente distribuita:
+
+```sh
+python3 fletcher.py --output runtime-scan.json scan runtime/bom.json
+python3 fletcher.py --output fletcher-triage.json triage fletcher-scan.json \
+  --runtime-scan runtime-scan.json --runtime-release "$(cat runtime/image.ref)"
+```
+
+SonarQube resta il controllo del sorgente. Lo SBOM di Syft documenta il contenuto dell'immagine e non attesta raggiungibilità o sfruttabilità delle dipendenze.

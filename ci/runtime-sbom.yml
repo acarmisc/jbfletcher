@@ -1,0 +1,20 @@
+# Extend from a post-push job. The build must emit IMAGE_REF in a dotenv artifact.
+.fletcher-runtime-sbom:
+  image:
+    name: anchore/syft:v1.38.0-debug
+    entrypoint: ['']
+  variables:
+    SYFT_CHECK_FOR_APP_UPDATE: 'false'
+  script:
+    - |
+      if ! printf '%s\n' "${IMAGE_REF:-}" | grep -Eq '^[^[:space:]@]+@sha256:[0-9a-f]{64}$'; then
+        echo 'IMAGE_REF must identify a manifest by digest' >&2
+        exit 1
+      fi
+      mkdir -p runtime
+      syft scan "registry:$IMAGE_REF" -o cyclonedx-json=runtime/bom.json
+      printf '%s\n' "$IMAGE_REF" > runtime/image.ref
+  artifacts:
+    access: developer
+    expire_in: 30 days
+    paths: [runtime/bom.json, runtime/image.ref]
