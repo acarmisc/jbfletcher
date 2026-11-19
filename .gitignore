@@ -1,4 +1,5 @@
 __pycache__/
 .venv/
 fletcher-*.json
+fletcher-summary.md
 target/

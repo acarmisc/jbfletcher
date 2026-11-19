@@ -126,6 +126,45 @@ def summarize(result, model):
     return str(agent(json.dumps(evidence)))
 
 
+def markdown_report(result, known_exploited):
+    import html
+    import re
+
+    def cell(value):
+        return re.sub(r'([\\`*_\[\]|])', r'\\\1', html.escape(' '.join(value.split())))
+
+    rows = {}
+    for source in result['osv']['results']:
+        for item in source.get('packages', []):
+            package = item['package']
+            for advisory in item.get('vulnerabilities', []):
+                identifiers = [advisory['id'], *advisory.get('aliases', [])]
+                cves = {value for value in identifiers if re.fullmatch(r'CVE-\d{4}-\d{4,}', value)}
+                fixes = {event['fixed'] for affected in advisory.get('affected', [])
+                         if affected.get('package', {}).get('name') == package['name']
+                         and affected['package'].get('ecosystem') == package.get('ecosystem')
+                         for interval in affected.get('ranges', []) for event in interval.get('events', [])
+                         if 'fixed' in event}
+                for identifier in cves or {advisory['id']}:
+                    rows.setdefault((package['name'], package['version'], identifier), set()).update(fixes)
+    lines = ['# Fletcher — scansione Maven', '', f"Pacchetti analizzati: **{result['packages']}**. "
+             f"Occorrenze scanner: **{result['findings']}**. Righe deduplicate: **{len(rows)}**.", '',
+             '| Pacchetto | Versione | Advisory | CISA KEV | Fix dichiarati¹ |', '|---|---|---|---|---|']
+    candidates = set()
+    for (name, version, advisory), fixes in sorted(rows.items(), key=lambda row: (row[0][2] not in (known_exploited or ()), row[0])):
+        status = 'Sì' if advisory in (known_exploited or ()) else 'N/D' if known_exploited is None or not advisory.startswith('CVE-') else 'No'
+        fields = name, version, advisory, status, ', '.join(sorted(fixes)) or '—'
+        lines.append('| ' + ' | '.join(map(cell, fields)) + ' |')
+        if status == 'Sì':
+            candidates.add((name, advisory))
+    lines += ['', '¹ Versioni dichiarate negli intervalli OSV: non sono raccomandazioni né fix verificati.', '',
+              '## Issue GitLab — simulazione', '', 'Nessuna scrittura. Candidati KEV preliminari; non è ancora verificata la presenza di una MR.']
+    lines += [f'- {cell(name)} — {advisory}' for name, advisory in sorted(candidates)]
+    if not candidates:
+        lines.append('- KEV non disponibile: simulazione sospesa.' if known_exploited is None else '- Nessun candidato KEV.')
+    return '\n'.join(lines) + '\n'
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--output', type=Path)
@@ -135,12 +174,20 @@ def main():
     scanner = commands.add_parser('scan')
     scanner.add_argument('sbom', type=Path)
     scanner.add_argument('--scanner', default='osv-scanner')
+    scanner.add_argument('--summary', type=Path)
     args = parser.parse_args()
     try:
         result = digest(args.days) if args.command == 'digest' else scan(args.sbom, args.scanner)
     except (OSError, ValueError, KeyError, subprocess.SubprocessError) as exc:
         parser.exit(2, f'fletcher: {exc}\n')
     result['generated_at'] = dt.datetime.now(dt.timezone.utc).isoformat()
+    if args.command == 'scan' and args.summary:
+        try:
+            known_exploited = {row['cveID'] for row in kev()}
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f'KEV unavailable; issue simulation suspended: {type(exc).__name__}', file=sys.stderr)
+            known_exploited = None
+        args.summary.write_text(markdown_report(result, known_exploited), encoding='utf-8')
     if args.bedrock_model and not result.get('errors'):
         try:
             from strands.models import BedrockModel

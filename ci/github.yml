@@ -19,13 +19,15 @@ jobs:
         with:
           persist-credentials: false
       - run: mvn -B org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeAggregateBom
-      - run: python3 /opt/fletcher/fletcher.py --output fletcher-scan.json scan target/bom.json
+      - run: python3 /opt/fletcher/fletcher.py --output fletcher-scan.json scan target/bom.json --summary fletcher-summary.md
       - run: python3 /opt/fletcher/fletcher.py --output fletcher-digest.json digest
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: fletcher
-          path: fletcher-*.json
+          path: |
+            fletcher-*.json
+            fletcher-summary.md
           retention-days: 14
   propose:
     needs: report

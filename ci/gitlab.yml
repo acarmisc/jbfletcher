@@ -4,7 +4,7 @@ fletcher-report:
     - if: '$CI_COMMIT_REF_PROTECTED == "true" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH && ($CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web")'
   script:
     - mvn -B org.cyclonedx:cyclonedx-maven-plugin:2.9.1:makeAggregateBom
-    - python3 /opt/fletcher/fletcher.py --output fletcher-scan.json scan target/bom.json
+    - python3 /opt/fletcher/fletcher.py --output fletcher-scan.json scan target/bom.json --summary fletcher-summary.md
     - python3 /opt/fletcher/fletcher.py --output fletcher-digest.json digest
   artifacts:
     when: always
@@ -13,6 +13,7 @@ fletcher-report:
     paths:
       - fletcher-scan.json
       - fletcher-digest.json
+      - fletcher-summary.md
 
 fletcher-renovate:
   image:

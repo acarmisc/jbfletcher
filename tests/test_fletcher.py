@@ -9,6 +9,16 @@ import fletcher
 
 
 class FletcherTest(unittest.TestCase):
+    def test_markdown_deduplicates_by_package_version_and_cve(self):
+        advisory = {'id': 'GHSA-example', 'aliases': ['CVE-2020-1234']}
+        package = {'package': {'name': 'example:lib', 'version': '1', 'ecosystem': 'Maven'},
+                   'vulnerabilities': [advisory, {**advisory, 'id': 'OSV-example'}]}
+        result = {'packages': 1, 'findings': 2, 'osv': {'results': [{'packages': [package]}]}}
+        report = fletcher.markdown_report(result, {'CVE-2020-1234'})
+        self.assertEqual(report.count('| example:lib |'), 1)
+        self.assertIn('- example:lib — CVE-2020-1234', report)
+        self.assertIn('simulazione sospesa', fletcher.markdown_report(result, None))
+
     @patch('fletcher.time.sleep')
     @patch('fletcher.fetch')
     def test_nvd_pages_and_ignores_rejected(self, fetch, sleep):

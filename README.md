@@ -21,6 +21,8 @@ python3 fletcher.py --output fletcher-scan.json scan tests/fixture/target/bom.js
 
 La fixture contiene una release storica vulnerabile: usarla solo come input per la scansione, non distribuire il suo contenuto. Nella CLI, exit `0` significa rapporto generato (anche con finding), `2` segnala un errore o digest parziale. `NVD_API_KEY` è opzionale. Il report JSON contiene dettagli interni: condividerlo solo con chi ha accesso al progetto.
 
+Aggiungere `--summary fletcher-summary.md` dopo il percorso dell'SBOM per il report Markdown (incluso nei template CI). Le righe sono deduplicate per pacchetto, versione e identificativo CVE, oppure ID OSV se non è disponibile un alias CVE. La simulazione elenca solo i candidati CISA KEV per pacchetto e CVE, senza aprire issue né verificare MR esistenti. Se KEV è indisponibile, la simulazione è sospesa; il rapporto OSV resta disponibile.
+
 Per Bedrock, installare `strands-agents` in un venv, impostare `FLETCHER_BEDROCK_MODEL` e configurare regione e credenziali Bedrock nella normale chain AWS. Disattivarlo lasciando la variabile non impostata. Nell'immagine impostare anche `--build-arg STRANDS_VERSION=<versione-verificata>` per installare il pacchetto. Non c'è telemetria applicativa verso un servizio di Fletcher.
 
 ## Attivazione GitLab
